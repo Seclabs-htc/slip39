@@ -7,33 +7,36 @@
 #include "hmac.h"
 #include "rand.h"
 
+#include "misc.h"
+
 #include "slip39_wordlist.h"
 #include "slip39.h"
-
 #include "gf256.h"
 
-void dumphex(uint8_t *b, int l);
-int fromhex(uint8_t *buf, uint32_t *buf_len, const char *str);
+
+#define ID_LENGTH_BITS 15               /* The length of the random identifier in bits */
+#define CHECKSUM_LENGTH_WORDS 3         /* The length of the RS1024 checksum in words. */
+#define DIGEST_LENGTH_BYTES 4           /* The length of the digest of the shared secret in bytes. */
+#define SECRET_INDEX 255                /* The index of the share containing the shared secret. */
+#define DIGEST_INDEX 254                /* The index of the share containing the digest of the shared secret. */
+#define MAX_SHARE_COUNT 16              /* The maximum number of shares that can be created. */
+#define ROUND_COUNT 4                   /* The number of rounds to use in the Feistel cipher. */
+#define BASE_ITERATION_COUNT 10000      /* The minimum number of iterations to use in PBKDF2. */
+#define CUSTOMIZATION_STRING "shamir"   /* The customization string used in the RS1024 checksum and in the PBKDF2 salt. */
 
 
-bool shamir_interpolate(uint8_t *result, uint8_t result_index,
-                        const uint8_t *share_indices,
-                        const uint8_t **share_values, uint8_t share_count,
-                        size_t len);
-
-
-size_t memscpy(void *d, size_t ds, const void *s, size_t ss)
-{
-    size_t cs;
-
-    cs = (ds < ss) ? ds : ss;
-    memcpy(d, s, cs);
-
-    return cs;
-}
-
-
-// -----------------------------------------------------------------------------------------------------------------
+typedef struct _group_shares {
+    uint16_t id;    /* identifier */
+    uint16_t ie;    /* Iteration exponent */
+    uint16_t gi;    /* Group index  */
+    uint16_t gt;    /* Group threshold */
+    uint16_t gc;    /* Group count */
+    uint16_t mi;    /* Member index */
+    uint16_t mt;    /* Member threshold */
+    uint32_t c;     /* check sum */
+    uint16_t sl;    /* share value len */
+    uint8_t s[MAX_SAHRE_VALUE_LEN];  /* share value */
+} group_shares;
 
 
 typedef struct _RS1024_CTX {
@@ -133,7 +136,7 @@ static int rs1024_verify_checksum(uint32_t *val, int val_len)
     o: output
     ol: output len
 */
-int encode_mnemonic(uint16_t id, uint16_t ie, uint16_t gi, uint16_t gt, uint16_t gc,
+static int encode_mnemonic(uint16_t id, uint16_t ie, uint16_t gi, uint16_t gt, uint16_t gc,
                 uint16_t mi, uint16_t mt, uint8_t *v, int vl, char *o, uint32_t ol)
 {
     int i, ms = 33; // max words
@@ -283,7 +286,7 @@ static int _split_secret(uint8_t t, uint8_t n, uint8_t *s, int sl, uint8_t **gs)
     gs: group shares
     gsi: group share indices
 */
-int _recover_secret(uint8_t t, int sl, uint8_t *gsi, const uint8_t **gs, uint8_t *result)
+static int _recover_secret(uint8_t t, int sl, uint8_t *gsi, const uint8_t **gs, uint8_t *result)
 {
     int i, j;
     uint8_t shared_secret[sl];
@@ -304,10 +307,7 @@ int _recover_secret(uint8_t t, int sl, uint8_t *gsi, const uint8_t **gs, uint8_t
     /* check digest_share hash */
     hmac_sha256(&digest_share[DIGEST_LENGTH_BYTES], sl - DIGEST_LENGTH_BYTES, shared_secret, sl, hash);
     if(memcmp(digest_share, hash, DIGEST_LENGTH_BYTES) != 0)
-    {
-        printf("digest error\n");
-        return -3;
-    }
+        return -3;  // digest error
 
     memcpy(result, shared_secret, sl);
 
@@ -402,6 +402,7 @@ static int _encrypt(uint8_t *ms, int msl, uint8_t *ems, int emsl,
     return 0;
 }
 
+
 /*
     Decryption of the master secret
 
@@ -414,7 +415,7 @@ static int _encrypt(uint8_t *ms, int msl, uint8_t *ems, int emsl,
     ie: iteration exponent
     id: identifier
 */
-int _decrypt(uint8_t *ems, int emsl, uint8_t *ms, int msl,
+static int _decrypt(uint8_t *ems, int emsl, uint8_t *ms, int msl,
         uint8_t *pp, int ppl, uint8_t ie, uint16_t id)
 {
     int j, hl = emsl / 2;
@@ -586,16 +587,17 @@ static int mnemonic_to_indices(char *ml, uint32_t *words, int *wc)
     return 0;
 }
 
-int decode_mnemonic(char *ml,
-                uint16_t *id, uint16_t *ie,
-                uint16_t *gi, uint16_t *gt, uint16_t *gc,
-                uint16_t *mi, uint16_t *mt,
-                uint8_t *v, int *vl)
+/*
+    ml: list of mnemonics
+    gs: group_shares
+*/
+int decode_mnemonic(char *ml, group_shares *gs)
 {
     uint32_t words[33];
     int i, j, wc, r, vc;
     int padding, msl;
     uint32_t p, bits;
+    uint8_t *v = gs->s;
 
     wc = 33;
     mnemonic_to_indices(ml, words, &wc);
@@ -610,21 +612,24 @@ int decode_mnemonic(char *ml,
     padding = (wc - 7) * 10 % 8;
     msl = (wc - 7) * 10 / 8;
 
-    if (*vl < msl)
+    if (msl > 32)
         return -3;
 
-    *id = words[0] << 5 | words[1] >> 5;
-    *ie = words[1] & 0x1f;
-    *gi = words[2] >> 6;
-    *gt = ((words[2] >> 2) & 0x1f) + 1;
-    *gc = ((words[2] & 0x3) << 8 | (words[3] >> 8) & 0x3) + 1;
-    *mi = (words[3] >> 4) & 0xf;
-    *mt = (words[3] & 0xf) + 1;
+    gs->id = words[0] << 5 | words[1] >> 5;
+    gs->ie = words[1] & 0x1f;
+    gs->gi = words[2] >> 6;
+    gs->gt = ((words[2] >> 2) & 0xf) + 1;
+    gs->gc = ((words[2] & 0x3) << 8 | (words[3] >> 8) & 0x3) + 1;
+    gs->mi = (words[3] >> 4) & 0xf;
+    gs->mt = (words[3] & 0xf) + 1;
 
     j = 4;
     if (padding)
     {
         bits = 10 - padding;
+        // padding should be zero
+        if( (words[j] >> bits) != 0)
+            return -5;
         p = words[j++] & ((1<<(bits+1))-1);
     }
     else
@@ -643,15 +648,184 @@ int decode_mnemonic(char *ml,
         {
             *v++ = (p >> (bits - 8)) & 0xFF;
             vc++;
-
-            if (vc >= *vl)
+            if (vc > 32)
                 return -4;
             bits -= 8;
             p = p & ((0x1UL << bits) - 1);
         }
     }
-    *vl = msl;
+    gs->sl = msl;
 
     return 0;
 }
 
+/*
+    gn: no of mnemonics
+    ml: list of mnemonics
+    pp: passphrase
+    ppl: passphrase len
+    ms: master secret
+    msl: master secret len
+*/
+int combine_mnemonics(int gn, char *ml[], uint8_t *pp, int ppl, uint8_t *ms, int *msl)
+{
+    int i, j, k, r, ret = 0;
+    group_shares *gs;
+    uint16_t id, ie, gt, gc, gi, sl;
+    uint8_t gm[16]; // group index member
+    uint16_t gmc, gmt, mic, gmic = 0;
+    uint8_t *m_share[16];
+    uint8_t m_share_index[16];
+    uint8_t *g_share[16];
+    uint8_t g_share_index[16];
+    uint8_t gsv[MAX_SAHRE_VALUE_LEN];
+
+    gs = malloc(sizeof(group_shares) * gn);
+    if (gs == NULL)
+        return -1;
+
+    for (i = 0; i < gn; i++)
+    {
+        r = decode_mnemonic(ml[i], &gs[i]);
+        if (r != 0)
+        {
+            ret = -2;
+            goto exit;
+        }
+    }
+
+    id = gs[0].id;
+    ie = gs[0].ie;
+    gt = gs[0].gt;
+    gc = gs[0].gc;
+    sl = gs[0].sl;
+    for (i = 1; i < gn; i++)
+    {
+        if ((id != gs[i].id) || (ie != gs[i].ie) ||
+            (gt != gs[i].gt) || (gc != gs[i].gc) ||
+            (sl != gs[i].sl))
+        {
+            ret = -3;
+            goto exit;
+        }
+    }
+
+    if ((sl < 16) || (sl & 1))
+    {
+        ret = -4;
+        goto exit;
+    }
+    if (gt > gc)
+    {
+        ret = -5;
+        goto exit;
+    }
+
+    memset(gm, 0, sizeof(gm));
+    for (i = 0; i < gn; i++)
+        gm[gs[i].gi]++;
+
+    gmc = 0;
+    for (i = 0; i < 16; i++)
+        if (gm[i] != 0)
+            gmc++;
+    if (gmc < gt)
+    {
+        ret = -6;
+        goto exit;
+    }
+
+    for (i = 0; i < gn; i++)
+    {
+        gi = gs[i].gi;
+        for (j = 0; j < gn; j++)
+        {
+            if ((i != j) && (gi == gs[j].gi))
+            {
+                if (gs[i].mt != gs[j].mt)
+                {
+                    ret = -7;
+                    goto exit;
+                }
+            }
+        }
+    }
+
+    memset(g_share, 0, sizeof(g_share));
+    memset(g_share_index, 0, sizeof(g_share_index));
+
+    for (i = 0; i < 16; i++)
+    {
+        if (gm[i] != 0)
+        {
+            mic = 0; gmt = 0;
+            for (j = 0; j < gn; j++)
+            {
+                if (i == gs[j].gi)
+                {
+                    for (k = 0; k < gn; k++)
+                    {
+                        if ((j != k) && (i == gs[k].gi) && (gs[j].mi == gs[k].mi))
+                        {
+                            ret = -8;
+                            goto exit;
+                        }
+                    }
+                    gmt = gs[j].mt;
+                    m_share[mic] = gs[j].s;
+                    m_share_index[mic] = gs[j].mi;
+                    mic++;
+                }
+            }
+            r = _recover_secret(gmt, sl, m_share_index, (const uint8_t **)m_share, gsv);
+            if (r == 0)
+            {
+                g_share[gmic] = (uint8_t *)malloc(MAX_SAHRE_VALUE_LEN);
+                memcpy(g_share[gmic], gsv, sl);
+
+                g_share_index[gmic] = i;
+                gmic++;
+            }
+            else
+            {
+                ret = -9;
+                goto exit;
+            }
+            if (mic < gmt)
+            {
+                ret = -10;
+                goto exit;
+            }
+        }
+    }
+
+    if ((ms == NULL) || (*msl < sl))
+    {
+        ret = -11;
+        goto exit;
+    }
+
+    r = _recover_secret(gmic, sl, g_share_index, (const uint8_t **)g_share, gsv);
+    if (r == 0)
+    {
+        _decrypt(gsv, sl, gsv, sl, pp, ppl, ie, id);
+
+        memcpy(ms, gsv, sl);
+        *msl = sl;
+    }
+    else
+    {
+        ret = -12;
+    }
+
+exit:
+
+    if (gs != NULL)
+        free(gs);
+
+    for (i = 0; i < gmic; i++)
+        if (g_share[i] != NULL)
+            free(g_share[i]);
+
+    return ret;
+}

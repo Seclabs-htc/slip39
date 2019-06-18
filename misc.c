@@ -67,3 +67,12 @@ void dumphex(uint8_t *b, int l)
     }
 }
 
+size_t memscpy(void *d, size_t ds, const void *s, size_t ss)
+{
+    size_t cs;
+
+    cs = (ds < ss) ? ds : ss;
+    memcpy(d, s, cs);
+
+    return cs;
+}

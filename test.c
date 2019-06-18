@@ -8,23 +8,20 @@
 
 void dumphex(uint8_t *b, int l);
 int fromhex(uint8_t *buf, uint32_t *buf_len, const char *str);
+int test_vectors(void);
 
-uint8_t gsi[5];
-uint8_t gs[5][32];
-uint8_t r[32];
-uint8_t m[32];
 
-int test_slip39(void)
+int simple_test(void)
 {
     uint8_t master_secret[32];
     int master_secret_len;
-    uint16_t id, ie, gi, gt, gc, mi, mt;
-    uint8_t ems[32];
-    int emsl;
+    uint16_t gt;
     int i, j;
     int gn = 5;
-    uint8_t *gsb[5];
     char *ml[gn];
+    char *dml[5];
+    uint8_t ms[32];
+    int msl;
 
     // create
 
@@ -46,32 +43,30 @@ int test_slip39(void)
     generate_mnemonics(gt, gn, master_secret, master_secret_len,
             NULL, 0, 0, ml);
 
-    // dump mnemonic
+    printf("\n");
     for (i = 0; i < gn; i++)
-        printf("[%d] %s\n", i, ml[i]);
+        printf("%s\n", ml[i]);
+    printf("\n");
 
-    for (i = 0; i < gn; i++)
-    {
-        emsl = sizeof(ems);
-        decode_mnemonic(ml[i], &id, &ie, &gi, &gt, &gc, &mi, &mt, ems, &emsl);
-        gsi[i] = mi;
-        gsb[i] = gs[i];
-        memcpy(gsb[i], ems, emsl);
-    }
-
-    _recover_secret(mt, emsl, gsi, (const uint8_t **)gsb, r);
-
-    printf("encrypt master secret\n");
-    dumphex(r, emsl);
-    _decrypt(r, emsl, m, emsl, NULL, 0, 0, id);
+    // choice 4, 3, 0 for decode
+    dml[0] = ml[4];
+    dml[1] = ml[3];
+    dml[2] = ml[0];
+    msl = sizeof(ms);
+    combine_mnemonics(gt, dml, NULL, 0, ms, &msl);
 
     printf("master secret\n");
-    dumphex(m, emsl);
+    dumphex(ms, msl);
 
-    if (memcmp(master_secret, m, master_secret_len) == 0)
+    if ((msl == master_secret_len) &&
+        memcmp(master_secret, ms, msl) == 0)
+    {
         printf("\n--- pass ---\n\n");
+    }
     else
+    {
         printf("\n--- fail ---\n\n");
+    }
 
     for (i = 0; i < gn; i++)
         free(ml[i]);
@@ -81,7 +76,8 @@ int test_slip39(void)
 
 int main(void)
 {
-    test_slip39();
+    simple_test();
+    test_vectors();
 
     return 0;
 }

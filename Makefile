@@ -9,8 +9,8 @@ trezor-crypto-src = \
 
 all: trezor-crypto test
 
-test: $(trezor-crypto) test.c slip39.c gf256.c misc.c
-	gcc -std=gnu99 -I. -I./trezor-crypto $(trezor-crypto-src) test.c slip39.c gf256.c misc.c -o $@
+test: $(trezor-crypto) test.c slip39.c gf256.c misc.c vectors.c
+	gcc -std=gnu99 -I. -I./trezor-crypto $(trezor-crypto-src) test.c slip39.c gf256.c misc.c vectors.c -o $@
 
 .PHONY: trezor-crypto
 trezor-crypto:
